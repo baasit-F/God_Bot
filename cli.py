@@ -20,6 +20,7 @@ import pandas as pd
 
 from config import PROJECT_ROOT, settings
 from data.storage import Storage
+from models.engine import MARKET_LABELS
 
 
 # ---------------------------------------------------------------------- formatting
@@ -57,7 +58,7 @@ def cmd_backtest(args: argparse.Namespace) -> None:
     from backtest.metrics import by_period, by_tier, summarize
     from backtest.plots import plot_report
     from backtest.walkforward import model_vs_market, run_walk_forward
-    from models.features import build_feature_frame
+    from models.features import build_feature_frame, build_quotes
 
     store = Storage()
     games = store.games()
@@ -65,11 +66,14 @@ def cmd_backtest(args: argparse.Namespace) -> None:
         sys.exit("No games in the database. Run `python cli.py generate-mock` or ingest data first.")
 
     print(f"Building leakage-free features for {len(games):,} games ...")
-    feats = build_feature_frame(games, store.odds(), store.sentiment(), store.team_stats())
-    print(f"Running walk-forward backtest (retrain every {settings.retrain_every_days}d, "
-          f"decision at T-{settings.decision_hours_before:g}h, de-vig={settings.devig_method}) ...")
+    odds = store.odds()
+    feats = build_feature_frame(games, odds, store.sentiment(), store.team_stats())
+    quotes = build_quotes(games, odds)
+    print(f"Running walk-forward backtest (markets {', '.join(settings.markets)}; retrain every "
+          f"{settings.retrain_every_days}d, decision at T-{settings.decision_hours_before:g}h, de-vig={settings.devig_method}) ...")
     result = run_walk_forward(
         feats,
+        quotes,
         start=pd.Timestamp(args.start) if args.start else None,
         end=pd.Timestamp(args.end) if args.end else None,
         bankroll=args.bankroll,
@@ -101,9 +105,17 @@ def cmd_backtest(args: argparse.Namespace) -> None:
     print(md_table(["Metric", "Value"], rows, ["l", "r"]))
 
     mvm = model_vs_market(result.predictions)
-    print("\n## Out-of-sample calibration (all games, lower is better)\n")
-    print(md_table(["Source", "Brier", "Log loss"],
-                   [[k.title(), f"{v['brier']:.4f}", f"{v['log_loss']:.4f}"] for k, v in mvm.items()], ["l", "r", "r"]))
+    print("\n## Out-of-sample accuracy: model vs sharp line (lower is better)\n")
+    print(md_table(["Market", "Metric", "Model", "Sharp line", "Games"],
+                   [[r["market"], r["metric"], f"{r['model']:.4f}", f"{r['sharp']:.4f}", f"{r['games']:,}"] for r in mvm],
+                   ["l", "l", "r", "r", "r"]))
+
+    markets = by_tier(result.bets, "market")
+    print("\n## By market\n")
+    print(md_table(["Market", "Bets", "Win %", "Profit", "Yield", "Avg CLV"],
+                   [[MARKET_LABELS.get(str(r.Index), str(r.Index)), f"{r.bets:,}", _pct(r.win_rate), _money(r.profit),
+                     _pct(r.yield_, 2, True), _pct(r.avg_clv, 2, True)]
+                    for r in markets.rename(columns={"yield": "yield_"}).itertuples()], ["l", "r", "r", "r", "r", "r"]))
 
     tiers = by_tier(result.bets)
     print("\n## By confidence tier\n")
@@ -131,6 +143,7 @@ def cmd_backtest(args: argparse.Namespace) -> None:
 def cmd_daily_picks(args: argparse.Namespace) -> None:
     from models.daily import run_daily
 
+
     day = pd.Timestamp(args.date) if args.date else pd.Timestamp(date.today())
     bankroll = args.bankroll if args.bankroll is not None else settings.starting_bankroll
     result = run_daily(Storage(), day, bankroll, args.model, args.days)
@@ -138,8 +151,10 @@ def cmd_daily_picks(args: argparse.Namespace) -> None:
 
     span = f"{day:%a %d %b %Y}" + (f" - {day + pd.Timedelta(days=args.days - 1):%a %d %b %Y}" if args.days > 1 else "")
     print(f"\n# ValuePicks Bot - NFL Top Line Picks - {span}\n")
-    print(f"Model trained on {result.trained_on:,} completed games. Slate: {len(result.opportunities) // 2} games, "
-          f"{len(result.opportunities)} sides screened.")
+    opp = result.opportunities
+    n_games = opp["game_id"].nunique() if not opp.empty else 0
+    print(f"Models trained on {result.trained_on:,} completed games. Slate: {n_games} games, "
+          f"{len(opp)} selections screened across {', '.join(MARKET_LABELS[m] for m in settings.markets)}.")
     print(f"Filters: VOS > {settings.min_vos}, EV > {_pct(settings.min_ev, 1, True)}, "
           f"odds {settings.min_odds:.2f}-{settings.max_odds:.2f}. "
           f"Sizing: {settings.kelly_fraction:g}x Kelly, cap {_pct(settings.max_stake_pct, 0)}/pick, "
@@ -148,26 +163,35 @@ def cmd_daily_picks(args: argparse.Namespace) -> None:
         print("No opportunities passed the filters on this slate. Sitting out is a position.")
         return
 
-    rows = [
-        [
-            str(i + 1),
-            p.fixture,
-            f"{p.selection} ({p.book})",
-            f"{p.odds:.2f}",
-            _pct(p.p_model),
-            _pct(p.p_market),
-            _pct(p.ev, 1, True),
-            f"{p.vos:.2f} ({p.tier})",
-            f"{_money(p.stake)} ({_pct(p.stake_pct, 2)})",
+    for market in settings.markets:
+        mp = picks[picks["market"] == market]
+        print(f"## {MARKET_LABELS[market]}\n")
+        if mp.empty:
+            print("No picks.\n")
+            continue
+        rows = [
+            [
+                str(i + 1),
+                p.fixture,
+                f"{p.selection} ({p.book})",
+                f"{p.odds:.2f}",
+                _pct(p.p_model),
+                _pct(p.p_market),
+                _pct(p.ev, 1, True),
+                f"{p.vos:.2f} ({p.tier})",
+                f"{_money(p.stake)} ({_pct(p.stake_pct, 2)})",
+            ]
+            for i, p in enumerate(mp.itertuples())
         ]
-        for i, p in enumerate(picks.itertuples())
-    ]
-    print(md_table(
-        ["Rank", "Fixture", "Selection", "Odds", "Model Prob", "Devig Prob", "EV %", "VOS Score", "Recommended Stake"],
-        rows, ["r", "l", "l", "r", "r", "r", "r", "r", "r"],
-    ))
-    print(f"\nTotal exposure: {_money(picks['stake'].sum())} ({_pct(picks['stake_pct'].sum(), 2)} of bankroll). "
-          f"VOS tier in brackets (A=1.0, B=0.75, C=0.5).")
+        print(md_table(
+            ["Rank", "Fixture", "Selection", "Odds", "Model Prob", "Devig Prob", "EV %", "VOS Score", "Recommended Stake"],
+            rows, ["r", "l", "l", "r", "r", "r", "r", "r", "r"],
+        ))
+        print()
+    print(f"Total exposure: {_money(picks['stake'].sum())} ({_pct(picks['stake_pct'].sum(), 2)} of bankroll) "
+          f"across {len(picks)} picks. VOS tier in brackets (A=1.0, B=0.75, C=0.5).")
+    if {"spreads", "totals"} & set(picks["market"]):
+        print("Spread/total probabilities exclude pushes; EV and stakes account for them.")
 
     out = settings.reports_dir
     out.mkdir(parents=True, exist_ok=True)

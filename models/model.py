@@ -95,8 +95,11 @@ class WinProbModel:
             raise RuntimeError("Model is not fitted")
         X, offset = df[self.features].to_numpy(float), df[OFFSET_FEATURE].to_numpy(float)
         if isinstance(self.model, OffsetLogit):
-            return _sigmoid(self.model.decision_function(X, offset))
-        return _sigmoid(offset + self.model.predict(X, raw_score=True))
+            adjust = self.model.decision_function(X, offset) - offset
+        else:
+            adjust = self.model.predict(X, raw_score=True)
+        cap = settings.max_logit_dev
+        return _sigmoid(offset + np.clip(adjust, -cap, cap))
 
     def coefficients(self) -> pd.Series | None:
         """Standardised slopes of the market-offset logit (log-odds per 1 sd)."""

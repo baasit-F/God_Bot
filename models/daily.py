@@ -10,9 +10,9 @@ import pandas as pd
 
 from config import settings
 from data.storage import Storage
-from models.features import build_feature_frame
-from models.model import WinProbModel
-from models.scoring import build_opportunities, select_picks, size_picks
+from models.engine import MarketModels
+from models.features import build_feature_frame, build_quotes
+from models.scoring import select_picks, size_picks
 
 
 @dataclass
@@ -31,16 +31,18 @@ def run_daily(
     last_day = day + pd.Timedelta(days=days - 1)
     games = games[games["game_date"] <= last_day]
     # decision_hours_before=0: use the latest pre-game snapshot available now.
-    feats = build_feature_frame(games, store.odds(), store.sentiment(), store.team_stats(), decision_hours_before=0)
+    odds = store.odds()
+    feats = build_feature_frame(games, odds, store.sentiment(), store.team_stats(), decision_hours_before=0)
+    quotes = build_quotes(games, odds, decision_hours_before=0)
 
-    history = feats[(feats["game_date"] < day) & feats["home_win"].notna()]
+    history = feats[(feats["game_date"] < day) & (feats["status"] == "final")]
     slate = feats[feats["game_date"].between(day, last_day) & (feats["status"] != "final")]
     if len(history) < settings.min_train_games:
         raise RuntimeError(f"Only {len(history)} finished games before {day.date()}; need {settings.min_train_games}")
     if slate.empty:
         return DailyPicks(day, pd.DataFrame(), pd.DataFrame(), len(history))
 
-    model = WinProbModel(model_type).fit(history)
-    opp = build_opportunities(slate, model.predict_home(slate))
+    models = MarketModels(model_type=model_type).fit(history)
+    opp = models.opportunities(slate, quotes)
     picks = size_picks(select_picks(opp), bankroll)
     return DailyPicks(day, picks, opp, len(history))

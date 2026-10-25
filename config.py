@@ -70,6 +70,7 @@ class Settings:
     bettable_books: list[str] = field(
         default_factory=lambda: _env_list("VP_BETTABLE_BOOKS", ["draftkings", "fanduel", "betmgm", "caesars"])
     )
+    markets: list[str] = field(default_factory=lambda: _env_list("VP_MARKETS", ["h2h", "spreads", "totals"]))
     devig_method: str = field(default_factory=lambda: _env("VP_DEVIG_METHOD", "shin"))  # "shin" | "proportional"
 
     # --- Pick filters ------------------------------------------------------
@@ -104,6 +105,27 @@ class Settings:
     # Hours before kickoff at which the bot "decides". Only odds snapshots at
     # or before this point are visible to the model (no closing-line leakage).
     decision_hours_before: float = field(default_factory=lambda: _env_float("VP_DECISION_HOURS", 3.0))
+
+    # --- Line markets (spreads / totals) ------------------------------------
+    # Standard deviation of NFL final margin and final total around their
+    # expected values; used to turn a line + price into an implied mean and to
+    # price any other line.
+    margin_sd: float = field(default_factory=lambda: _env_float("VP_MARGIN_SD", 13.5))
+    total_sd: float = field(default_factory=lambda: _env_float("VP_TOTAL_SD", 10.0))
+    # Ridge penalties of the margin/total residual models (higher = closer to the
+    # market). Chosen on the 2024 season of the mock data (train 2021-23).
+    spread_model_l2: float = field(default_factory=lambda: _env_float("VP_SPREAD_MODEL_L2", 100.0))
+    total_model_l2: float = field(default_factory=lambda: _env_float("VP_TOTAL_MODEL_L2", 500.0))
+    # Moneyline and spread on the same team are highly correlated; by default
+    # keep only the higher-VOS of the two per game. Totals are independent.
+    allow_correlated: bool = field(default_factory=lambda: _env("VP_ALLOW_CORRELATED", "false").lower() == "true")
+
+    # Guardrail: the largest disagreement with the sharp line any model may
+    # express. Bigger gaps are far likelier to be model error (small samples,
+    # rare flags such as both teams on a short week) than real edge.
+    max_logit_dev: float = field(default_factory=lambda: _env_float("VP_MAX_LOGIT_DEV", 0.30))  # ~7 pts of prob at 50%
+    max_spread_dev: float = field(default_factory=lambda: _env_float("VP_MAX_SPREAD_DEV", 2.5))  # points
+    max_total_dev: float = field(default_factory=lambda: _env_float("VP_MAX_TOTAL_DEV", 2.5))  # points
 
     # --- NFL team model -----------------------------------------------------
     # Elo in the FiveThirtyEight NFL style: K=20, ~48 Elo points of home field

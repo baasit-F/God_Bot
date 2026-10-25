@@ -1,7 +1,7 @@
 """Walk-forward backtester.
 
 For every betting day D (chronologically):
-  1. (Re)train the model on final games with game_date < D, every
+  1. (Re)train the moneyline, margin and total models on final games with game_date < D, every
      `retrain_every_days` days. Training never sees day D or later.
   2. Predict day D's games from features that only use pre-D results and
      decision-time odds snapshots (see models.features).
@@ -17,8 +17,9 @@ import numpy as np
 import pandas as pd
 
 from config import settings
-from models.model import WinProbModel, evaluate_probs
-from models.scoring import build_opportunities, select_picks, size_picks
+from models.engine import MarketModels
+from models.model import evaluate_probs
+from models.scoring import select_picks, size_picks
 
 
 @dataclass
@@ -32,6 +33,7 @@ class BacktestResult:
 
 def run_walk_forward(
     features: pd.DataFrame,
+    quotes: pd.DataFrame | None = None,
     start: pd.Timestamp | None = None,
     end: pd.Timestamp | None = None,
     bankroll: float | None = None,
@@ -39,10 +41,11 @@ def run_walk_forward(
     verbose: bool = True,
 ) -> BacktestResult:
     bankroll0 = settings.starting_bankroll if bankroll is None else bankroll
-    df = features[features["home_win"].notna()].copy()
+    df = features[features["status"] == "final"].copy()
+    quotes = quotes if quotes is not None else pd.DataFrame(columns=["game_id", "market"])
     dates = sorted(df["game_date"].unique())
 
-    model: WinProbModel | None = None
+    model: MarketModels | None = None
     last_train: pd.Timestamp | None = None
     retrains: list[pd.Timestamp] = []
     bankroll_now = bankroll0
@@ -56,22 +59,19 @@ def run_walk_forward(
         if len(history) < settings.min_train_games:
             continue
         if model is None or (day - last_train).days >= settings.retrain_every_days:
-            model = WinProbModel(model_type).fit(history)
+            model = MarketModels(model_type=model_type).fit(history)
             last_train = day
             retrains.append(day)
             if verbose:
                 print(f"  [{day.date()}] retrained on {len(history):,} games (bankroll {bankroll_now:,.0f})")
 
         today = df[df["game_date"] == day]
-        p_home = model.predict_home(today)
-        preds.append(pd.DataFrame({"game_id": today["game_id"].values, "game_date": day, "p_model_home": p_home,
-                                   "p_market_home": today["p_sharp_home"].values, "home_win": today["home_win"].values}))
-
-        picks = size_picks(select_picks(build_opportunities(today, p_home)), bankroll_now)
+        preds.append(model.predictions(today))
+        picks = size_picks(select_picks(model.opportunities(today, quotes)), bankroll_now)
         pnl = 0.0
         if not picks.empty:
             picks["bankroll_before"] = bankroll_now
-            # won: 1 = win, 0 = loss, 0.5 = tie, refunded as a push on a two-way moneyline.
+            # won: 1 = win, 0 = loss, 0.5 = push (moneyline tie or landing on a whole-number line).
             picks["profit"] = np.select(
                 [picks["won"] == 1.0, picks["won"] == 0.5], [picks["stake"] * (picks["odds"] - 1.0), 0.0], -picks["stake"]
             )
@@ -94,11 +94,21 @@ def run_walk_forward(
     )
 
 
-def model_vs_market(predictions: pd.DataFrame) -> dict[str, dict[str, float]]:
-    """Out-of-sample calibration of the model against the sharp market."""
-    decided = predictions[predictions["home_win"].isin([0.0, 1.0])]
-    y = decided["home_win"].to_numpy()
-    return {
-        "model": evaluate_probs(y, decided["p_model_home"].to_numpy()),
-        "market": evaluate_probs(y, decided["p_market_home"].to_numpy()),
-    }
+def model_vs_market(predictions: pd.DataFrame) -> list[dict[str, object]]:
+    """Out-of-sample accuracy of each model against the sharp market (lower is better)."""
+    rows: list[dict[str, object]] = []
+    decided = predictions[predictions["home_win"].isin([0.0, 1.0]) & predictions["p_model_home"].notna()]
+    if not decided.empty:
+        y = decided["home_win"].to_numpy()
+        m, k = evaluate_probs(y, decided["p_model_home"].to_numpy()), evaluate_probs(y, decided["p_market_home"].to_numpy())
+        rows.append({"market": "Moneyline", "metric": "Brier", "model": m["brier"], "sharp": k["brier"], "games": len(decided)})
+    for prefix, actual, label in (("spread", "actual_margin", "Spread"), ("total", "actual_total", "Total")):
+        col = f"{prefix}_mu_model"
+        if col not in predictions:
+            continue
+        d = predictions[predictions[col].notna() & predictions[actual].notna()]
+        if d.empty:
+            continue
+        rmse = lambda pred: float(np.sqrt(np.mean((d[actual] - pred) ** 2)))  # noqa: E731
+        rows.append({"market": label, "metric": "RMSE (pts)", "model": rmse(d[col]), "sharp": rmse(d[f"{prefix}_mu"]), "games": len(d)})
+    return rows

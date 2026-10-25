@@ -45,7 +45,7 @@ def summarize(result: BacktestResult) -> dict[str, float]:
     return {
         "bets": int(len(bets)),
         "betting_days": int((daily["n_bets"] > 0).sum()),
-        "win_rate": float((bets["won"] == 1.0).sum() / max((bets["won"] != 0.5).sum(), 1)),
+        "win_rate": _win_rate(bets["won"]),
         "pushes": int((bets["won"] == 0.5).sum()),
         "avg_odds": float(bets["odds"].mean()),
         "total_staked": staked,
@@ -69,16 +69,24 @@ def by_period(bets: pd.DataFrame, freq: str = "M") -> pd.DataFrame:
     period = pd.to_datetime(bets["game_date"]).dt.to_period(freq)
     grp = bets.groupby(period)
     out = pd.DataFrame(
-        {"bets": grp.size(), "win_rate": grp["won"].mean(), "staked": grp["stake"].sum(), "profit": grp["profit"].sum()}
+        {"bets": grp.size(), "win_rate": grp["won"].apply(_win_rate), "staked": grp["stake"].sum(), "profit": grp["profit"].sum()}
     )
     out["yield"] = out["profit"] / out["staked"]
     return out
 
 
-def by_tier(bets: pd.DataFrame) -> pd.DataFrame:
+def by_tier(bets: pd.DataFrame, column: str = "tier") -> pd.DataFrame:
+    """Bets, win rate, profit and yield per tier (or any other column, e.g. market)."""
     if bets.empty:
         return pd.DataFrame()
-    grp = bets.groupby("tier")
-    out = pd.DataFrame({"bets": grp.size(), "win_rate": grp["won"].mean(), "staked": grp["stake"].sum(), "profit": grp["profit"].sum()})
+    grp = bets.groupby(column)
+    out = pd.DataFrame({"bets": grp.size(), "win_rate": grp["won"].apply(_win_rate), "staked": grp["stake"].sum(),
+                        "profit": grp["profit"].sum(), "avg_clv": grp["clv"].mean()})
     out["yield"] = out["profit"] / out["staked"]
     return out
+
+
+def _win_rate(won: pd.Series) -> float:
+    """Wins / decided bets (pushes excluded)."""
+    decided = won[won != 0.5]
+    return float((decided == 1.0).mean()) if len(decided) else float("nan")

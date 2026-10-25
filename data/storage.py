@@ -37,9 +37,10 @@ CREATE INDEX IF NOT EXISTS ix_games_date ON games(game_date);
 CREATE TABLE IF NOT EXISTS odds (
     game_id        TEXT NOT NULL,
     bookmaker      TEXT NOT NULL,
-    market         TEXT NOT NULL DEFAULT 'h2h',
-    selection      TEXT NOT NULL,          -- home | away | draw
+    market         TEXT NOT NULL DEFAULT 'h2h',   -- h2h | spreads | totals
+    selection      TEXT NOT NULL,          -- home | away (h2h, spreads) | over | under (totals)
     price          REAL NOT NULL,          -- decimal odds
+    point          REAL,                   -- handicap (spreads) or total line (totals)
     snapshot_time  TEXT NOT NULL,          -- ISO-8601 UTC
     PRIMARY KEY (game_id, bookmaker, market, selection, snapshot_time)
 );
@@ -74,6 +75,10 @@ class Storage:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as conn:
             conn.executescript(SCHEMA)
+            # Databases created before spreads/totals support lack the point column.
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(odds)")}
+            if "point" not in cols:
+                conn.execute("ALTER TABLE odds ADD COLUMN point REAL")
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:

@@ -34,7 +34,7 @@ class TheOddsAPIConnector(OddsConnector):
         return {
             "apiKey": self.api_key,
             "regions": self.regions,
-            "markets": "h2h",
+            "markets": ",".join(settings.markets),
             "oddsFormat": "decimal",
             "dateFormat": "iso",
             **extra,
@@ -93,18 +93,23 @@ class TheOddsAPIConnector(OddsConnector):
             )
             for book in ev.get("bookmakers", []):
                 for market in book.get("markets", []):
-                    if market.get("key") != "h2h":
+                    key = market.get("key")
+                    if key not in ("h2h", "spreads", "totals"):
                         continue
                     for outcome in market.get("outcomes", []):
                         name = outcome["name"]
-                        selection = "home" if name == ev["home_team"] else "away" if name == ev["away_team"] else "draw"
+                        if key == "totals":
+                            selection = name.lower()  # "Over" / "Under"
+                        else:
+                            selection = "home" if name == ev["home_team"] else "away" if name == ev["away_team"] else "draw"
                         odds.append(
                             {
                                 "game_id": ev["id"],
                                 "bookmaker": book["key"],
-                                "market": "h2h",
+                                "market": key,
                                 "selection": selection,
                                 "price": float(outcome["price"]),
+                                "point": float(outcome["point"]) if "point" in outcome else None,
                                 "snapshot_time": snap_iso,
                             }
                         )
