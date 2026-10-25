@@ -15,10 +15,19 @@ import pandas as pd
 from config import settings
 from data.connectors.base import ConnectorError, HttpConnector, StatsConnector
 
-# ESPN and The-Odds-API disagree on a few team names; map to the odds name.
+TEAM_STATS_COLUMNS = ["game_id", "team", "off_ypp", "def_ypp", "plays"]
+
+# Map provider-specific team names/abbreviations to The-Odds-API full names.
+# ESPN's NFL display names already match; SportsDataIO uses abbreviations.
 TEAM_ALIASES: dict[str, str] = {
-    "LA Clippers": "Los Angeles Clippers",
-    "LA Lakers": "Los Angeles Lakers",
+    "ARI": "Arizona Cardinals", "ATL": "Atlanta Falcons", "BAL": "Baltimore Ravens", "BUF": "Buffalo Bills",
+    "CAR": "Carolina Panthers", "CHI": "Chicago Bears", "CIN": "Cincinnati Bengals", "CLE": "Cleveland Browns",
+    "DAL": "Dallas Cowboys", "DEN": "Denver Broncos", "DET": "Detroit Lions", "GB": "Green Bay Packers",
+    "HOU": "Houston Texans", "IND": "Indianapolis Colts", "JAX": "Jacksonville Jaguars", "KC": "Kansas City Chiefs",
+    "LV": "Las Vegas Raiders", "LAC": "Los Angeles Chargers", "LAR": "Los Angeles Rams", "MIA": "Miami Dolphins",
+    "MIN": "Minnesota Vikings", "NE": "New England Patriots", "NO": "New Orleans Saints", "NYG": "New York Giants",
+    "NYJ": "New York Jets", "PHI": "Philadelphia Eagles", "PIT": "Pittsburgh Steelers", "SF": "San Francisco 49ers",
+    "SEA": "Seattle Seahawks", "TB": "Tampa Bay Buccaneers", "TEN": "Tennessee Titans", "WAS": "Washington Commanders",
 }
 
 ESPN_SPORT_PATHS: dict[str, str] = {
@@ -62,33 +71,33 @@ class ESPNStatsConnector(StatsConnector):
                 }
             )
         # The scoreboard has no advanced box-score metrics; team_stats stays empty
-        # here and is filled by richer providers (SportsDataIO / Basketball-Reference).
-        return pd.DataFrame(results), pd.DataFrame(columns=["game_id", "team", "off_rating", "def_rating", "pace"])
+        # here and is filled by richer providers (SportsDataIO / nflverse play-by-play).
+        return pd.DataFrame(results), pd.DataFrame(columns=TEAM_STATS_COLUMNS)
 
 
 class SportsDataIOConnector(StatsConnector):
-    """SportsDataIO NBA team game stats (requires SPORTSDATAIO_API_KEY)."""
+    """SportsDataIO NFL scores + team game stats (requires SPORTSDATAIO_API_KEY)."""
 
     def __init__(self, api_key: str | None = None) -> None:
         self.api_key = api_key or settings.sportsdataio_api_key
         if not self.api_key:
             raise ConnectorError("SPORTSDATAIO_API_KEY is not set")
-        self.http = HttpConnector("https://api.sportsdata.io/v3/nba/scores/json")
+        self.http = HttpConnector("https://api.sportsdata.io/v3/nfl/scores/json")
 
     def fetch_results(self, day: date) -> tuple[pd.DataFrame, pd.DataFrame]:
         stamp = day.strftime("%Y-%b-%d").upper()
-        games = self.http.get_json(f"GamesByDate/{stamp}", {"key": self.api_key})
+        games = self.http.get_json(f"ScoresByDate/{stamp}", {"key": self.api_key})
         results = [
             {
                 "game_date": day.isoformat(),
-                "home_team": g["HomeTeam"],
-                "away_team": g["AwayTeam"],
-                "home_score": g["HomeTeamScore"],
-                "away_score": g["AwayTeamScore"],
+                "home_team": canonical_team(g["HomeTeam"]),
+                "away_team": canonical_team(g["AwayTeam"]),
+                "home_score": g["HomeScore"],
+                "away_score": g["AwayScore"],
             }
             for g in games
             if g.get("Status") in ("Final", "F/OT")
         ]
-        # SportsDataIO uses team abbreviations; extend TEAM_ALIASES to map them to
-        # the odds provider's full names before relying on the join.
-        return pd.DataFrame(results), pd.DataFrame(columns=["game_id", "team", "off_rating", "def_rating", "pace"])
+        # Yards-per-play needs the TeamGameStatsByDate endpoint; map OffensiveYardsPerPlay
+        # and the opponent's value into TEAM_STATS_COLUMNS once game_ids are joined.
+        return pd.DataFrame(results), pd.DataFrame(columns=TEAM_STATS_COLUMNS)

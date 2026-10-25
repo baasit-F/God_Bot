@@ -56,7 +56,7 @@ def test_vos_formula():
 @pytest.fixture(scope="module")
 def mock_store(tmp_path_factory):
     store = Storage(tmp_path_factory.mktemp("db") / "test.db")
-    generate(store, seasons=1, today=pd.Timestamp("2026-10-25"), seed=7)
+    generate(store, seasons=2, today=pd.Timestamp("2026-10-25"), seed=7)
     return store
 
 

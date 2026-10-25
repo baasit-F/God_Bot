@@ -37,10 +37,10 @@ def confidence_tier(has_sharp: bool, min_games_played: float, sharp_move_toward:
     """A/B/C tier from three data-quality and market-agreement checks.
 
     +1  a sharp-book line exists at decision time (otherwise we de-vig consensus)
-    +1  both teams have >= 10 games this season (form/Elo features are mature)
+    +1  both teams have >= `min_games_for_tier` games this season (form features are mature)
     +1  the sharp line has not moved against the selection since open
     """
-    points = int(bool(has_sharp)) + int(min_games_played >= 10) + int(sharp_move_toward >= -0.005)
+    points = int(bool(has_sharp)) + int(min_games_played >= settings.min_games_for_tier) + int(sharp_move_toward >= -0.005)
     return "A" if points == 3 else "B" if points == 2 else "C"
 
 

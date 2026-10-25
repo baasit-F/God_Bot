@@ -30,17 +30,19 @@ FEATURES: list[str] = [
     "sharp_move",           # sharp home prob change from open to decision
     "sharp_soft_gap",       # sharp minus soft-book consensus home prob
     "money_ticket_gap",     # home handle % minus home ticket % (sharp money tell)
-    "elo_logit",            # Elo win probability (logit), home advantage included
-    "margin_diff_10",       # avg point margin over last 10 games, home minus away
-    "net_rating_diff_10",   # rolling net rating difference (needs team_stats)
-    "rest_diff",            # home rest days minus away rest days (capped)
-    "home_b2b",             # home team on a back-to-back
-    "away_b2b",             # away team on a back-to-back
+    "elo_logit",            # Elo win probability (logit), home field included
+    "margin_diff",          # avg point margin over the form window, home minus away
+    "ypp_diff",             # rolling (off - def) yards per play, home minus away
+    "rest_diff",            # home rest days minus away rest days (capped at 14)
+    "home_off_bye",         # home team coming off its bye week
+    "away_off_bye",
+    "home_short_week",      # home team on short rest (Thursday after Sunday)
+    "away_short_week",
 ]
 
-ELO_K = 20.0
-ELO_HOME_ADV = 70.0
-ELO_SEASON_REGRESS = 1.0 / 3.0
+REST_CAP_DAYS = 14
+BYE_REST_DAYS = 13
+SHORT_WEEK_DAYS = 5
 
 
 def _logit(p: np.ndarray | float) -> np.ndarray | float:
@@ -143,16 +145,20 @@ class TeamState:
     season: str | None = None
     last_date: pd.Timestamp | None = None
     games_in_season: int = 0
-    margins: deque = field(default_factory=lambda: deque(maxlen=10))
-    net_ratings: deque = field(default_factory=lambda: deque(maxlen=10))
+    margins: deque = field(default_factory=lambda: deque(maxlen=settings.form_window))
+    ypp_net: deque = field(default_factory=lambda: deque(maxlen=settings.form_window))
+
+
+def _elo_prob(home: TeamState, away: TeamState) -> float:
+    return 1.0 / (1.0 + 10 ** (-((home.elo + settings.elo_home_adv) - away.elo) / 400.0))
 
 
 def build_team_features(games: pd.DataFrame, team_stats: pd.DataFrame | None = None) -> pd.DataFrame:
     """Elo / form / rest features, featurising each day before learning from it."""
     stats = {}
     if team_stats is not None and not team_stats.empty:
-        ts = team_stats.dropna(subset=["off_rating", "def_rating"])
-        stats = {(r.game_id, r.team): r.off_rating - r.def_rating for r in ts.itertuples()}
+        ts = team_stats.dropna(subset=["off_ypp", "def_ypp"])
+        stats = {(r.game_id, r.team): r.off_ypp - r.def_ypp for r in ts.itertuples()}
 
     state: dict[str, TeamState] = defaultdict(TeamState)
     rows = []
@@ -164,27 +170,29 @@ def build_team_features(games: pd.DataFrame, team_stats: pd.DataFrame | None = N
             h, a = state[gm.home_team], state[gm.away_team]
             for team in (h, a):
                 if team.season is not None and team.season != gm.season:
-                    team.elo = 1500.0 + (team.elo - 1500.0) * (1 - ELO_SEASON_REGRESS)
+                    team.elo = 1500.0 + (team.elo - 1500.0) * (1 - settings.elo_season_regress)
                     team.games_in_season = 0
                     team.margins.clear()
-                    team.net_ratings.clear()
+                    team.ypp_net.clear()
                     team.last_date = None
                 team.season = gm.season
 
-            elo_p = 1.0 / (1.0 + 10 ** (-((h.elo + ELO_HOME_ADV) - a.elo) / 400.0))
-            rest_h = min((day - h.last_date).days, 4) if h.last_date is not None else 4
-            rest_a = min((day - a.last_date).days, 4) if a.last_date is not None else 4
+            elo_p = _elo_prob(h, a)
+            # Week 1 counts as fully rested (off-season), not as coming off a bye.
+            rest_h = min((day - h.last_date).days, REST_CAP_DAYS) if h.last_date is not None else None
+            rest_a = min((day - a.last_date).days, REST_CAP_DAYS) if a.last_date is not None else None
             rows.append(
                 {
                     "game_id": gm.game_id,
                     "elo_prob": elo_p,
                     "elo_logit": float(_logit(elo_p)),
-                    "margin_diff_10": (np.mean(h.margins) if h.margins else 0.0) - (np.mean(a.margins) if a.margins else 0.0),
-                    "net_rating_diff_10": (np.mean(h.net_ratings) if h.net_ratings else 0.0)
-                    - (np.mean(a.net_ratings) if a.net_ratings else 0.0),
-                    "rest_diff": rest_h - rest_a,
-                    "home_b2b": int(rest_h == 1),
-                    "away_b2b": int(rest_a == 1),
+                    "margin_diff": (np.mean(h.margins) if h.margins else 0.0) - (np.mean(a.margins) if a.margins else 0.0),
+                    "ypp_diff": (np.mean(h.ypp_net) if h.ypp_net else 0.0) - (np.mean(a.ypp_net) if a.ypp_net else 0.0),
+                    "rest_diff": (rest_h or 7) - (rest_a or 7),
+                    "home_off_bye": int(rest_h is not None and rest_h >= BYE_REST_DAYS),
+                    "away_off_bye": int(rest_a is not None and rest_a >= BYE_REST_DAYS),
+                    "home_short_week": int(rest_h is not None and rest_h <= SHORT_WEEK_DAYS),
+                    "away_short_week": int(rest_a is not None and rest_a <= SHORT_WEEK_DAYS),
                     "min_games_played": min(h.games_in_season, a.games_in_season),
                 }
             )
@@ -195,17 +203,18 @@ def build_team_features(games: pd.DataFrame, team_stats: pd.DataFrame | None = N
                 continue
             h, a = state[gm.home_team], state[gm.away_team]
             margin = float(gm.home_score - gm.away_score)
-            expected = 1.0 / (1.0 + 10 ** (-((h.elo + ELO_HOME_ADV) - a.elo) / 400.0))
+            expected = _elo_prob(h, a)
+            actual = 1.0 if margin > 0 else 0.0 if margin < 0 else 0.5
             mov_mult = math.log(abs(margin) + 1.0) * (2.2 / ((abs(h.elo - a.elo) * 0.001) + 2.2))
-            delta = ELO_K * mov_mult * ((1.0 if margin > 0 else 0.0) - expected)
+            delta = settings.elo_k * mov_mult * (actual - expected)
             h.elo += delta
             a.elo -= delta
             h.margins.append(margin)
             a.margins.append(-margin)
             if (gm.game_id, gm.home_team) in stats:
-                h.net_ratings.append(stats[(gm.game_id, gm.home_team)])
+                h.ypp_net.append(stats[(gm.game_id, gm.home_team)])
             if (gm.game_id, gm.away_team) in stats:
-                a.net_ratings.append(stats[(gm.game_id, gm.away_team)])
+                a.ypp_net.append(stats[(gm.game_id, gm.away_team)])
             for team in (h, a):
                 team.last_date = day
                 team.games_in_season += 1
@@ -224,7 +233,12 @@ def build_feature_frame(
     market = build_market_features(games, odds, sentiment, decision_hours_before=decision_hours_before)
     team = build_team_features(games, team_stats)
     df = games.merge(market, on="game_id", how="left").merge(team, on="game_id", how="left")
-    df["home_win"] = np.where(df["status"] == "final", (df["home_score"] > df["away_score"]).astype(float), np.nan)
+    # 1 = home win, 0 = away win, 0.5 = tie (a push on a two-way moneyline).
+    df["home_win"] = np.where(
+        df["status"] == "final",
+        np.sign(df["home_score"] - df["away_score"]).map({1.0: 1.0, -1.0: 0.0, 0.0: 0.5}),
+        np.nan,
+    )
     df = df.dropna(subset=["p_sharp_home", "best_home_price", "best_away_price"])
     df[FEATURES] = df[FEATURES].fillna(0.0)
     return df.sort_values("commence_time").reset_index(drop=True)

@@ -45,7 +45,8 @@ def summarize(result: BacktestResult) -> dict[str, float]:
     return {
         "bets": int(len(bets)),
         "betting_days": int((daily["n_bets"] > 0).sum()),
-        "win_rate": float(bets["won"].mean()),
+        "win_rate": float((bets["won"] == 1.0).sum() / max((bets["won"] != 0.5).sum(), 1)),
+        "pushes": int((bets["won"] == 0.5).sum()),
         "avg_odds": float(bets["odds"].mean()),
         "total_staked": staked,
         "profit": profit,

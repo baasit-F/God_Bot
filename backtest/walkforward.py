@@ -71,7 +71,10 @@ def run_walk_forward(
         pnl = 0.0
         if not picks.empty:
             picks["bankroll_before"] = bankroll_now
-            picks["profit"] = np.where(picks["won"] == 1.0, picks["stake"] * (picks["odds"] - 1.0), -picks["stake"])
+            # won: 1 = win, 0 = loss, 0.5 = tie, refunded as a push on a two-way moneyline.
+            picks["profit"] = np.select(
+                [picks["won"] == 1.0, picks["won"] == 0.5], [picks["stake"] * (picks["odds"] - 1.0), 0.0], -picks["stake"]
+            )
             # CLV: how much better our price was than the de-vigged closing line.
             picks["clv"] = picks["odds"] * picks["p_close"] - 1.0
             pnl = float(picks["profit"].sum())
@@ -93,8 +96,9 @@ def run_walk_forward(
 
 def model_vs_market(predictions: pd.DataFrame) -> dict[str, dict[str, float]]:
     """Out-of-sample calibration of the model against the sharp market."""
-    y = predictions["home_win"].to_numpy()
+    decided = predictions[predictions["home_win"].isin([0.0, 1.0])]
+    y = decided["home_win"].to_numpy()
     return {
-        "model": evaluate_probs(y, predictions["p_model_home"].to_numpy()),
-        "market": evaluate_probs(y, predictions["p_market_home"].to_numpy()),
+        "model": evaluate_probs(y, decided["p_model_home"].to_numpy()),
+        "market": evaluate_probs(y, decided["p_market_home"].to_numpy()),
     }

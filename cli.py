@@ -2,9 +2,9 @@
 
     python cli.py generate-mock            # synthetic data for offline testing
     python cli.py backtest                 # walk-forward backtest + report
-    python cli.py daily-picks              # today's Top Line Picks
+    python cli.py daily-picks --days 2     # Top Line Picks for Sunday + Monday night
     python cli.py ingest-odds              # pull live odds (needs ODDS_API_KEY)
-    python cli.py ingest-results --date 2026-10-24
+    python cli.py ingest-results --date 2026-10-19
     python cli.py export-parquet
 """
 
@@ -133,10 +133,11 @@ def cmd_daily_picks(args: argparse.Namespace) -> None:
 
     day = pd.Timestamp(args.date) if args.date else pd.Timestamp(date.today())
     bankroll = args.bankroll if args.bankroll is not None else settings.starting_bankroll
-    result = run_daily(Storage(), day, bankroll, args.model)
+    result = run_daily(Storage(), day, bankroll, args.model, args.days)
     picks = result.picks
 
-    print(f"\n# ValuePicks Bot - Top Line Picks - {day:%A %d %B %Y}\n")
+    span = f"{day:%a %d %b %Y}" + (f" - {day + pd.Timedelta(days=args.days - 1):%a %d %b %Y}" if args.days > 1 else "")
+    print(f"\n# ValuePicks Bot - NFL Top Line Picks - {span}\n")
     print(f"Model trained on {result.trained_on:,} completed games. Slate: {len(result.opportunities) // 2} games, "
           f"{len(result.opportunities)} sides screened.")
     print(f"Filters: VOS > {settings.min_vos}, EV > {_pct(settings.min_ev, 1, True)}, "
@@ -144,7 +145,7 @@ def cmd_daily_picks(args: argparse.Namespace) -> None:
           f"Sizing: {settings.kelly_fraction:g}x Kelly, cap {_pct(settings.max_stake_pct, 0)}/pick, "
           f"bankroll {_money(bankroll)}.\n")
     if picks.empty:
-        print("No opportunities passed the filters today. Sitting out is a position.")
+        print("No opportunities passed the filters on this slate. Sitting out is a position.")
         return
 
     rows = [
@@ -215,7 +216,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
 
     g = sub.add_parser("generate-mock", help="generate synthetic data into the SQLite DB")
-    g.add_argument("--seasons", type=int, default=3, help="completed seasons to simulate before the current one")
+    g.add_argument("--seasons", type=int, default=5, help="completed seasons to simulate before the current one")
     g.add_argument("--today", default=date.today().isoformat(), help="date of the simulated upcoming slate")
     g.add_argument("--seed", type=int, default=settings.random_seed)
     g.set_defaults(func=cmd_generate_mock)
@@ -229,8 +230,9 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--verbose", action="store_true", help="log each retrain")
     b.set_defaults(func=cmd_backtest)
 
-    d = sub.add_parser("daily-picks", help="score today's slate and print Top Line Picks")
-    d.add_argument("--date", help="slate date (default: today)")
+    d = sub.add_parser("daily-picks", help="score a slate and print Top Line Picks")
+    d.add_argument("--date", help="first slate date (default: today)")
+    d.add_argument("--days", type=int, default=1, help="slate length in days, e.g. 2 for Sunday + Monday night")
     d.add_argument("--bankroll", type=float, default=None)
     d.add_argument("--model", choices=["logistic", "lightgbm"], default=None)
     d.set_defaults(func=cmd_daily_picks)

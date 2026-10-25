@@ -56,9 +56,9 @@ CREATE TABLE IF NOT EXISTS sentiment (
 CREATE TABLE IF NOT EXISTS team_stats (
     game_id        TEXT NOT NULL,
     team           TEXT NOT NULL,
-    off_rating     REAL,
-    def_rating     REAL,
-    pace           REAL,
+    off_ypp        REAL,                   -- offensive yards per play
+    def_ypp        REAL,                   -- yards per play allowed
+    plays          REAL,
     PRIMARY KEY (game_id, team)
 );
 """

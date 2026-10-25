@@ -1,4 +1,6 @@
-"""Daily prediction engine: train on everything final before today, score today's slate."""
+"""Slate prediction engine: train on everything final before the slate, score the slate.
+
+NFL slates span Thursday-Monday, so `days` widens the window (e.g. Sunday + Monday)."""
 
 from __future__ import annotations
 
@@ -21,15 +23,18 @@ class DailyPicks:
     trained_on: int
 
 
-def run_daily(store: Storage, day: pd.Timestamp, bankroll: float | None = None, model_type: str | None = None) -> DailyPicks:
+def run_daily(
+    store: Storage, day: pd.Timestamp, bankroll: float | None = None, model_type: str | None = None, days: int = 1
+) -> DailyPicks:
     bankroll = settings.starting_bankroll if bankroll is None else bankroll
     games = store.games()
-    games = games[games["game_date"] <= day]
+    last_day = day + pd.Timedelta(days=days - 1)
+    games = games[games["game_date"] <= last_day]
     # decision_hours_before=0: use the latest pre-game snapshot available now.
     feats = build_feature_frame(games, store.odds(), store.sentiment(), store.team_stats(), decision_hours_before=0)
 
     history = feats[(feats["game_date"] < day) & feats["home_win"].notna()]
-    slate = feats[(feats["game_date"] == day) & (feats["status"] != "final")]
+    slate = feats[feats["game_date"].between(day, last_day) & (feats["status"] != "final")]
     if len(history) < settings.min_train_games:
         raise RuntimeError(f"Only {len(history)} finished games before {day.date()}; need {settings.min_train_games}")
     if slate.empty:
